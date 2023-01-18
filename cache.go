@@ -15,35 +15,6 @@ import (
 	"github.com/comfforts/logger"
 )
 
-const CACHE_FILE_NAME = "cache"
-
-const (
-	ERROR_SET_CACHE                string = "error adding key/value to cache"
-	ERROR_GET_CACHE                string = "error getting key/value from cache"
-	ERROR_CREATING_CACHE_DIR       string = "error creating cache directory"
-	ERROR_GETTING_CACHE_FILE       string = "error getting cache file"
-	ERROR_SAVING_CACHE_FILE        string = "error saving cache file"
-	ERROR_OPENING_CACHE_FILE       string = "error opening cache file"
-	ERROR_LOADING_CACHE_FILE       string = "error loading cache file"
-	ERROR_MARSHALLING_CACHE_OBJECT string = "error marshalling object to json"
-	ERROR_UNMARSHALLING_CACHE_JSON string = "error unmarshalling json to struct"
-
-	VALUE_ADDED         = "added value to cache"
-	RETURNING_VALUE     = "returning value for given key"
-	KEY_DELETED         = "deleted value with given key"
-	DELETED_EXPIRED     = "deleted expired cache values"
-	RETURNING_COUNT     = "returning item count"
-	RETURNING_ALL_ITEMS = "returning all items"
-	CACHE_FLUSHED       = "cache flushed"
-)
-
-var (
-	ErrSetCache      = errors.NewAppError(ERROR_SET_CACHE)
-	ErrGetCache      = errors.NewAppError(ERROR_GET_CACHE)
-	ErrGetCacheFile  = errors.NewAppError(ERROR_GETTING_CACHE_FILE)
-	ErrSaveCacheFile = errors.NewAppError(ERROR_SAVING_CACHE_FILE)
-)
-
 type CacheService interface {
 	Set(key string, value interface{}, d time.Duration) error
 	Get(key string) (interface{}, time.Time, error)
@@ -87,16 +58,6 @@ func NewCacheService(dataDir string, logger logger.AppLogger, marshalFn MarshalF
 	return cacheService, nil
 }
 
-func (c *cacheService) setLoadedAt(at int64) {
-	c.loadedAt = at
-	c.updatedAt = at
-}
-
-func (c *cacheService) Updated() bool {
-	c.logger.Info("cache file", zap.Int64("loadedAt", c.loadedAt), zap.Int64("updatedAt", c.updatedAt))
-	return c.updatedAt > c.loadedAt
-}
-
 func (c *cacheService) Set(key string, value interface{}, d time.Duration) error {
 	err := c.cache.Add(key, value, d)
 	if err != nil {
@@ -116,34 +77,6 @@ func (c *cacheService) Get(key string) (interface{}, time.Time, error) {
 	}
 	c.logger.Debug(RETURNING_VALUE, zap.String("key", key), zap.String("cacheDir", c.dataDir))
 	return val, exp, nil
-}
-
-func (c *cacheService) delete(key string) {
-	c.cache.Delete(key)
-	c.updatedAt = time.Now().Unix()
-	c.logger.Debug(KEY_DELETED, zap.String("key", key), zap.String("cacheDir", c.dataDir))
-}
-
-func (c *cacheService) deleteExpired() {
-	c.cache.DeleteExpired()
-	c.logger.Debug(DELETED_EXPIRED, zap.String("cacheDir", c.dataDir))
-}
-
-func (c *cacheService) itemCount() int {
-	count := c.cache.ItemCount()
-	c.logger.Info(RETURNING_COUNT, zap.String("cacheDir", c.dataDir))
-	return count
-}
-
-func (c *cacheService) items() map[string]cache.Item {
-	items := c.cache.Items()
-	c.logger.Info(RETURNING_ALL_ITEMS, zap.String("cacheDir", c.dataDir))
-	return items
-}
-
-func (c *cacheService) clear() {
-	c.cache.Flush()
-	c.logger.Info(CACHE_FLUSHED, zap.String("cacheDir", c.dataDir))
 }
 
 func (c *cacheService) SaveFile() error {
@@ -196,6 +129,11 @@ func (c *cacheService) LoadFile() error {
 	return nil
 }
 
+func (c *cacheService) Updated() bool {
+	c.logger.Info("cache file", zap.Int64("loadedAt", c.loadedAt), zap.Int64("updatedAt", c.updatedAt))
+	return c.updatedAt > c.loadedAt
+}
+
 func (c *cacheService) load(r io.Reader) error {
 	dec := json.NewDecoder(r)
 	items := map[string]cache.Item{}
@@ -220,4 +158,37 @@ func (c *cacheService) load(r io.Reader) error {
 	c.setLoadedAt(time.Now().Unix())
 	c.logger.Info("cache file loaded", zap.Int64("loadedAt", c.loadedAt), zap.Int64("updatedAt", c.updatedAt))
 	return err
+}
+
+func (c *cacheService) setLoadedAt(at int64) {
+	c.loadedAt = at
+	c.updatedAt = at
+}
+
+func (c *cacheService) delete(key string) {
+	c.cache.Delete(key)
+	c.updatedAt = time.Now().Unix()
+	c.logger.Debug(KEY_DELETED, zap.String("key", key), zap.String("cacheDir", c.dataDir))
+}
+
+func (c *cacheService) deleteExpired() {
+	c.cache.DeleteExpired()
+	c.logger.Debug(DELETED_EXPIRED, zap.String("cacheDir", c.dataDir))
+}
+
+func (c *cacheService) itemCount() int {
+	count := c.cache.ItemCount()
+	c.logger.Info(RETURNING_COUNT, zap.String("cacheDir", c.dataDir))
+	return count
+}
+
+func (c *cacheService) items() map[string]cache.Item {
+	items := c.cache.Items()
+	c.logger.Info(RETURNING_ALL_ITEMS, zap.String("cacheDir", c.dataDir))
+	return items
+}
+
+func (c *cacheService) clear() {
+	c.cache.Flush()
+	c.logger.Info(CACHE_FLUSHED, zap.String("cacheDir", c.dataDir))
 }
