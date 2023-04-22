@@ -18,6 +18,12 @@ import (
 type CacheService interface {
 	Set(key string, value interface{}, d time.Duration) error
 	Get(key string) (interface{}, time.Time, error)
+	Delete(key string)
+	DeleteExpired()
+	ItemCount() int
+	Items() map[string]cache.Item
+	Clear()
+	ClearFile() error
 	SaveFile() error
 	LoadFile() error
 	Updated() bool
@@ -61,22 +67,38 @@ func NewCacheService(dataDir string, logger logger.AppLogger, marshalFn MarshalF
 func (c *cacheService) Set(key string, value interface{}, d time.Duration) error {
 	err := c.cache.Add(key, value, d)
 	if err != nil {
-		c.logger.Error(ERROR_SET_CACHE, zap.Error(err), zap.String("cacheDir", c.dataDir))
 		return errors.WrapError(err, ERROR_SET_CACHE)
 	}
 	c.updatedAt = time.Now().Unix()
-	c.logger.Debug(VALUE_ADDED, zap.String("key", key), zap.String("cacheDir", c.dataDir))
 	return nil
 }
 
 func (c *cacheService) Get(key string) (interface{}, time.Time, error) {
 	val, exp, ok := c.cache.GetWithExpiration(key)
 	if !ok {
-		c.logger.Error(ERROR_GET_CACHE, zap.Error(ErrGetCache), zap.String("cacheDir", c.dataDir))
 		return nil, time.Time{}, ErrGetCache
 	}
-	c.logger.Debug(RETURNING_VALUE, zap.String("key", key), zap.String("cacheDir", c.dataDir))
 	return val, exp, nil
+}
+
+func (c *cacheService) Delete(key string) {
+	c.delete(key)
+}
+
+func (c *cacheService) DeleteExpired() {
+	c.deleteExpired()
+}
+
+func (c *cacheService) Items() map[string]cache.Item {
+	return c.items()
+}
+
+func (c *cacheService) ItemCount() int {
+	return c.itemCount()
+}
+
+func (c *cacheService) Clear() {
+	c.clear()
 }
 
 func (c *cacheService) SaveFile() error {
@@ -90,14 +112,12 @@ func (c *cacheService) SaveFile() error {
 		}
 	}
 	if err != nil {
-		c.logger.Error(ERROR_CREATING_CACHE_DIR, zap.Error(err), zap.String("filePath", filePath))
-		return ErrSaveCacheFile
+		return errors.WrapError(err, ERROR_CREATING_CACHE_DIR)
 	}
 
 	file, err := os.Create(filePath)
 	if err != nil {
-		c.logger.Error(ERROR_GETTING_CACHE_FILE, zap.Error(err), zap.String("filePath", filePath))
-		return ErrGetCacheFile
+		return errors.WrapError(err, ERROR_GETTING_CACHE_FILE)
 	}
 	defer file.Close()
 
@@ -105,8 +125,7 @@ func (c *cacheService) SaveFile() error {
 	items := c.cache.Items()
 	err = encoder.Encode(items)
 	if err != nil {
-		c.logger.Error(ERROR_SAVING_CACHE_FILE, zap.Error(err), zap.String("filePath", filePath))
-		return ErrSaveCacheFile
+		return errors.WrapError(err, ERROR_SAVING_CACHE_FILE)
 	}
 	c.logger.Info("cache file saved", zap.String("filePath", filePath))
 	return nil
@@ -117,14 +136,29 @@ func (c *cacheService) LoadFile() error {
 	c.logger.Info("loading cache file", zap.String("filePath", filePath))
 	file, err := os.Open(filePath)
 	if err != nil {
-		c.logger.Error(ERROR_OPENING_CACHE_FILE, zap.Error(err))
-		return err
+		return errors.WrapError(err, ERROR_OPENING_CACHE_FILE)
 	}
 
 	err = c.load(file)
 	if err != nil {
-		c.logger.Error(ERROR_LOADING_CACHE_FILE, zap.Error(err), zap.String("filePath", filePath))
-		return err
+		return errors.WrapError(err, ERROR_LOADING_CACHE_FILE)
+	}
+	return nil
+}
+
+func (c *cacheService) ClearFile() error {
+	filePath := filepath.Join(c.dataDir, fmt.Sprintf("%s.json", CACHE_FILE_NAME))
+	c.logger.Info("removing cache file", zap.String("filePath", filePath))
+	_, err := os.Stat(filePath)
+	if err != nil {
+		c.logger.Info("file inaccessible", zap.String("filePath", filePath))
+		return nil
+	}
+
+	err = os.Remove(filePath)
+	if err != nil {
+		c.logger.Error("error removing file", zap.Error(err), zap.String("filePath", filePath))
+		return errors.WrapError(err, "error removing file")
 	}
 	return nil
 }
