@@ -61,10 +61,9 @@ func setupTest(t *testing.T) (
 		dataDir = TEST_DIR
 	}
 
-	logger := logger.NewTestAppLogger(dataDir)
+	testLogger := logger.NewTestAppLogger(dataDir)
 	cacheCfg := cache.CacheConfig{
 		DataDir:   dataDir,
-		AppLogger: logger,
 		MarshalFn: UnmarshallTestStruct,
 	}
 
@@ -76,10 +75,10 @@ func setupTest(t *testing.T) (
 			CredsPath: credsPath,
 			Bucket:    bktName,
 		}
-		ca, err = cache.NewWithCloudBackup(cacheCfg, cloudCfg)
+		ca, err = cache.NewWithCloudBackup(cacheCfg, cloudCfg, testLogger)
 		require.NoError(t, err)
 	} else {
-		ca, err = cache.NewCacheService(cacheCfg)
+		ca, err = cache.NewCacheService(cacheCfg, testLogger)
 		require.NoError(t, err)
 	}
 	require.Equal(t, true, ca != nil)
@@ -180,14 +179,13 @@ func TestSetGetReload(t *testing.T) {
 		dataDir = TEST_DIR
 	}
 
-	logger := logger.NewTestAppLogger(dataDir)
+	testLogger := logger.NewTestAppLogger(dataDir)
 	cacheCfg := cache.CacheConfig{
 		DataDir:       dataDir,
 		CacheFileName: "delivery",
-		AppLogger:     logger,
 		MarshalFn:     UnmarshallTestStruct,
 	}
-	ca, err := cache.NewCacheService(cacheCfg)
+	ca, err := cache.NewCacheService(cacheCfg, testLogger)
 	require.NoError(t, err)
 
 	val := TestStruct{
@@ -218,7 +216,7 @@ func TestSetGetReload(t *testing.T) {
 	err = ca.Clear()
 	require.NoError(t, err)
 
-	ca, err = cache.NewCacheService(cacheCfg)
+	ca, err = cache.NewCacheService(cacheCfg, testLogger)
 	require.NoError(t, err)
 
 	count = ca.ItemCount()
@@ -242,10 +240,9 @@ func TestSetGetReloadCloud(t *testing.T) {
 	require.Equal(t, true, credsPath != "")
 	require.Equal(t, true, bktName != "")
 
-	logger := logger.NewTestAppLogger(dataDir)
+	testLogger := logger.NewTestAppLogger(dataDir)
 	cacheCfg := cache.CacheConfig{
 		DataDir:   dataDir,
-		AppLogger: logger,
 		MarshalFn: UnmarshallTestStruct,
 	}
 
@@ -253,14 +250,14 @@ func TestSetGetReloadCloud(t *testing.T) {
 		CredsPath: credsPath,
 		Bucket:    bktName,
 	}
-	ca, err := cache.NewWithCloudBackup(cacheCfg, cloudCfg)
+	ca, err := cache.NewWithCloudBackup(cacheCfg, cloudCfg, testLogger)
 	require.NoError(t, err)
 
 	val := TestStruct{
-		Name: "Aominic",
+		Name: "Diminic",
 		Age:  43,
 	}
-	key := "test6"
+	key := "test4"
 
 	time.Sleep(10 * time.Millisecond)
 
@@ -286,7 +283,7 @@ func TestSetGetReloadCloud(t *testing.T) {
 	err = ca.Clear()
 	require.NoError(t, err)
 
-	ca, err = cache.NewCacheService(cacheCfg)
+	ca, err = cache.NewCacheService(cacheCfg, testLogger)
 	require.NoError(t, err)
 
 	count = ca.ItemCount()

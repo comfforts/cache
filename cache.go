@@ -39,7 +39,6 @@ type CacheConfig struct {
 	DataDir       string
 	CacheFileName string
 	MarshalFn
-	logger.AppLogger
 	DefaultExpiration      time.Duration
 	DefaultCleanupInterval time.Duration
 }
@@ -54,14 +53,15 @@ type MarshalFn func(p interface{}) (interface{}, error)
 
 type cacheService struct {
 	CacheConfig
-	loadedAt    int64
-	updatedAt   int64
-	cache       *cache.Cache
+	loadedAt  int64
+	updatedAt int64
+	cache     *cache.Cache
+	logger.AppLogger
 	StoreConfig CacheStorageConfig
 }
 
-func newCacheService(cfg CacheConfig) (*cacheService, error) {
-	if cfg.DataDir == "" || cfg.AppLogger == nil {
+func newCacheService(cfg CacheConfig, l logger.AppLogger) (*cacheService, error) {
+	if cfg.DataDir == "" || l == nil {
 		return nil, errors.NewAppError(errors.ERROR_MISSING_REQUIRED)
 	}
 
@@ -87,47 +87,56 @@ func newCacheService(cfg CacheConfig) (*cacheService, error) {
 	cacheService := &cacheService{
 		CacheConfig: cfg,
 		cache:       c,
+		AppLogger:   l,
 	}
 	return cacheService, nil
 }
 
-func NewCacheService(cfg CacheConfig) (*cacheService, error) {
-	cacheService, err := newCacheService(cfg)
+func NewCacheService(cfg CacheConfig, l logger.AppLogger) (*cacheService, error) {
+	cacheService, err := newCacheService(cfg, l)
 	if err != nil {
 		return nil, err
 	}
 
 	err = cacheService.loadFile()
 	if err != nil {
-		cacheService.Info("starting with fresh cache")
+		l.Info("starting with fresh cache")
 	}
 
 	return cacheService, nil
 }
 
-func NewWithCloudBackup(cacheCfg CacheConfig, cloudCfg CacheStorageConfig) (*cacheService, error) {
+func NewWithCloudBackup(cacheCfg CacheConfig, cloudCfg CacheStorageConfig, l logger.AppLogger) (*cacheService, error) {
+	if cacheCfg.DataDir == "" || l == nil {
+		return nil, errors.NewAppError(errors.ERROR_MISSING_REQUIRED)
+	}
+
+	if cacheCfg.MarshalFn == nil {
+		return nil, errors.NewAppError("missing cache data marshalling function")
+	}
+
 	if cloudCfg.CloudClient == nil {
 		if cloudCfg.Bucket == "" || cloudCfg.CredsPath == "" {
-			cacheCfg.Error("missing bucket and cloud credentials")
+			l.Error("missing bucket and cloud credentials")
 			return nil, errors.NewAppError("missing bucket and cloud credentials")
 		}
 
 		cscCfg := cloudstorage.CloudStorageClientConfig{
 			CredsPath: cloudCfg.CredsPath,
 		}
-		csc, err := cloudstorage.NewCloudStorageClient(cscCfg, cacheCfg.AppLogger)
+		csc, err := cloudstorage.NewCloudStorageClient(cscCfg, l)
 		if err != nil {
-			cacheCfg.Error("error creating cloud storage client", zap.Error(err))
+			l.Error("error creating cloud storage client", zap.Error(err))
 			return nil, errors.NewAppError("error creating cloud storage client")
 		}
 		cloudCfg.CloudClient = csc
 	}
 	if cloudCfg.Bucket == "" {
-		cacheCfg.Error("missing bucket information")
+		l.Error("missing bucket information")
 		return nil, errors.NewAppError("missing bucket information")
 	}
 
-	ca, err := newCacheService(cacheCfg)
+	ca, err := newCacheService(cacheCfg, l)
 	if err != nil {
 		return nil, err
 	}
@@ -135,7 +144,7 @@ func NewWithCloudBackup(cacheCfg CacheConfig, cloudCfg CacheStorageConfig) (*cac
 
 	err = ca.loadFile()
 	if err != nil {
-		ca.Info("starting with fresh cache")
+		l.Info("starting with fresh cache")
 	}
 
 	return ca, nil
