@@ -2,8 +2,6 @@ package cache
 
 import "github.com/comfforts/errors"
 
-const CACHE_FILE_NAME = "cache"
-
 const (
 	ERROR_SET_CACHE                string = "error adding key/value to cache"
 	ERROR_GET_CACHE                string = "error getting key/value from cache"

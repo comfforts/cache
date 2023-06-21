@@ -4,3 +4,5 @@ DS_STORE
 go.sum
 vendor
 data
+creds
+env

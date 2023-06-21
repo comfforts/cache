@@ -2,6 +2,7 @@ package cache_test
 
 import (
 	"encoding/json"
+	"os"
 	"testing"
 	"time"
 
@@ -40,7 +41,6 @@ func TestCache(t *testing.T) {
 		"cache set get, succeeds":        testSetGet,
 		"cache set get delete, succeeds": testSetGetDelete,
 		"cache set expire, succeeds":     testSetGetExpire,
-		"cache set get save, succeeds":   testSetGetSave,
 	} {
 		t.Run(scenario, func(t *testing.T) {
 			client, teardown := setupTest(t)
@@ -56,9 +56,33 @@ func setupTest(t *testing.T) (
 ) {
 	t.Helper()
 
-	logger := logger.NewTestAppLogger(TEST_DIR)
-	ca, err := cache.NewCacheService(TEST_DIR, logger, UnmarshallTestStruct)
-	require.NoError(t, err)
+	dataDir := os.Getenv("DATA_DIR")
+	if dataDir == "" {
+		dataDir = TEST_DIR
+	}
+
+	logger := logger.NewTestAppLogger(dataDir)
+	cacheCfg := cache.CacheConfig{
+		DataDir:   dataDir,
+		AppLogger: logger,
+		MarshalFn: UnmarshallTestStruct,
+	}
+
+	var err error
+	credsPath := os.Getenv("CREDS_PATH")
+	bktName := os.Getenv("BUCKET_NAME")
+	if credsPath != "" && bktName != "" {
+		cloudCfg := cache.CacheStorageConfig{
+			CredsPath: credsPath,
+			Bucket:    bktName,
+		}
+		ca, err = cache.NewWithCloudBackup(cacheCfg, cloudCfg)
+		require.NoError(t, err)
+	} else {
+		ca, err = cache.NewCacheService(cacheCfg)
+		require.NoError(t, err)
+	}
+	require.Equal(t, true, ca != nil)
 
 	return ca, func() {
 		t.Log(" TestCache ended")
@@ -150,7 +174,22 @@ func testSetGetExpire(t *testing.T, ca cache.CacheService) {
 	require.Equal(t, 0, count)
 }
 
-func testSetGetSave(t *testing.T, ca cache.CacheService) {
+func TestSetGetReload(t *testing.T) {
+	dataDir := os.Getenv("DATA_DIR")
+	if dataDir == "" {
+		dataDir = TEST_DIR
+	}
+
+	logger := logger.NewTestAppLogger(dataDir)
+	cacheCfg := cache.CacheConfig{
+		DataDir:       dataDir,
+		CacheFileName: "delivery",
+		AppLogger:     logger,
+		MarshalFn:     UnmarshallTestStruct,
+	}
+	ca, err := cache.NewCacheService(cacheCfg)
+	require.NoError(t, err)
+
 	val := TestStruct{
 		Name: "John",
 		Age:  34,
@@ -158,7 +197,7 @@ func testSetGetSave(t *testing.T, ca cache.CacheService) {
 	key := "test"
 
 	now := time.Now().Unix()
-	err := ca.Set(key, val, 5*time.Minute)
+	err = ca.Set(key, val, 5*time.Minute)
 	require.NoError(t, err)
 
 	cVal, exp, err := ca.Get(key)
@@ -176,15 +215,76 @@ func testSetGetSave(t *testing.T, ca cache.CacheService) {
 	updated := ca.Updated()
 	require.Equal(t, true, updated)
 
-	err = ca.SaveFile()
+	err = ca.Clear()
 	require.NoError(t, err)
 
-	ca.Clear()
+	ca, err = cache.NewCacheService(cacheCfg)
+	require.NoError(t, err)
 
 	count = ca.ItemCount()
-	require.Equal(t, 0, count)
+	require.Equal(t, 1, count)
 
-	err = ca.LoadFile()
+	updated = ca.Updated()
+	require.Equal(t, false, updated)
+
+	err = ca.ClearFile()
+	require.NoError(t, err)
+}
+
+func TestSetGetReloadCloud(t *testing.T) {
+	dataDir := os.Getenv("DATA_DIR")
+	if dataDir == "" {
+		dataDir = TEST_DIR
+	}
+
+	credsPath := os.Getenv("CREDS_PATH")
+	bktName := os.Getenv("BUCKET_NAME")
+	require.Equal(t, true, credsPath != "")
+	require.Equal(t, true, bktName != "")
+
+	logger := logger.NewTestAppLogger(dataDir)
+	cacheCfg := cache.CacheConfig{
+		DataDir:   dataDir,
+		AppLogger: logger,
+		MarshalFn: UnmarshallTestStruct,
+	}
+
+	cloudCfg := cache.CacheStorageConfig{
+		CredsPath: credsPath,
+		Bucket:    bktName,
+	}
+	ca, err := cache.NewWithCloudBackup(cacheCfg, cloudCfg)
+	require.NoError(t, err)
+
+	val := TestStruct{
+		Name: "John",
+		Age:  34,
+	}
+	key := "test"
+
+	now := time.Now().Unix()
+	err = ca.Set(key, val, 5*time.Minute)
+	require.NoError(t, err)
+
+	cVal, exp, err := ca.Get(key)
+	require.NoError(t, err)
+	require.Equal(t, int64(300), exp.Unix()-now)
+
+	rVal, ok := cVal.(TestStruct)
+	require.Equal(t, true, ok)
+	require.Equal(t, val.Age, rVal.Age)
+	require.Equal(t, val.Name, rVal.Name)
+
+	count := ca.ItemCount()
+	require.Equal(t, 1, count)
+
+	updated := ca.Updated()
+	require.Equal(t, true, updated)
+
+	err = ca.Clear()
+	require.NoError(t, err)
+
+	ca, err = cache.NewCacheService(cacheCfg)
 	require.NoError(t, err)
 
 	count = ca.ItemCount()
