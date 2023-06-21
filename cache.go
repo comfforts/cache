@@ -64,6 +64,11 @@ func newCacheService(cfg CacheConfig) (*cacheService, error) {
 	if cfg.DataDir == "" || cfg.AppLogger == nil {
 		return nil, errors.NewAppError(errors.ERROR_MISSING_REQUIRED)
 	}
+
+	if cfg.MarshalFn == nil {
+		return nil, errors.NewAppError("missing cache data marshalling function")
+	}
+
 	defaultExp := cfg.DefaultExpiration
 	if defaultExp <= 0 {
 		defaultExp = DEFAULT_EXPIRATION
@@ -101,34 +106,39 @@ func NewCacheService(cfg CacheConfig) (*cacheService, error) {
 }
 
 func NewWithCloudBackup(cacheCfg CacheConfig, cloudCfg CacheStorageConfig) (*cacheService, error) {
-	cacheService, err := newCacheService(cacheCfg)
-	if err != nil {
-		return nil, err
-	}
-
 	if cloudCfg.CloudClient == nil {
 		if cloudCfg.Bucket == "" || cloudCfg.CredsPath == "" {
-			cacheService.Error("missing bucket and cloud credentials")
-			return cacheService, nil
+			cacheCfg.Error("missing bucket and cloud credentials")
+			return nil, errors.NewAppError("missing bucket and cloud credentials")
 		}
 
 		cscCfg := cloudstorage.CloudStorageClientConfig{
 			CredsPath: cloudCfg.CredsPath,
 		}
-		csc, err := cloudstorage.NewCloudStorageClient(cscCfg, cacheService.AppLogger)
+		csc, err := cloudstorage.NewCloudStorageClient(cscCfg, cacheCfg.AppLogger)
 		if err != nil {
-			cacheService.Error("error creating cloud storage client", zap.Error(err))
-			return cacheService, nil
+			cacheCfg.Error("error creating cloud storage client", zap.Error(err))
+			return nil, errors.NewAppError("error creating cloud storage client")
 		}
 		cloudCfg.CloudClient = csc
 	}
 	if cloudCfg.Bucket == "" {
-		cacheService.Error("missing bucket information")
-		return cacheService, nil
+		cacheCfg.Error("missing bucket information")
+		return nil, errors.NewAppError("missing bucket information")
 	}
 
-	cacheService.StoreConfig = cloudCfg
-	return cacheService, nil
+	ca, err := newCacheService(cacheCfg)
+	if err != nil {
+		return nil, err
+	}
+	ca.StoreConfig = cloudCfg
+
+	err = ca.loadFile()
+	if err != nil {
+		ca.Info("starting with fresh cache")
+	}
+
+	return ca, nil
 }
 
 func (c *cacheService) Set(key string, value interface{}, d time.Duration) error {
@@ -289,6 +299,14 @@ func (c *cacheService) clear() error {
 
 	c.cache.Flush()
 	c.Info(CACHE_FLUSHED, zap.String("cacheDir", c.DataDir))
+
+	if c.StoreConfig.CloudClient != nil {
+		err := c.StoreConfig.CloudClient.Close()
+		if err != nil {
+			c.Error("error closing cloud storage client", zap.Error(err))
+			return err
+		}
+	}
 
 	return nil
 }

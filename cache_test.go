@@ -257,10 +257,12 @@ func TestSetGetReloadCloud(t *testing.T) {
 	require.NoError(t, err)
 
 	val := TestStruct{
-		Name: "John",
-		Age:  34,
+		Name: "Aominic",
+		Age:  43,
 	}
-	key := "test"
+	key := "test6"
+
+	time.Sleep(10 * time.Millisecond)
 
 	now := time.Now().Unix()
 	err = ca.Set(key, val, 5*time.Minute)
