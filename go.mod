@@ -3,7 +3,7 @@ module github.com/comfforts/cache
 go 1.19
 
 require (
-	github.com/comfforts/cloudstorage v0.1.1
+	github.com/comfforts/cloudstorage v0.1.21
 	github.com/comfforts/errors v0.1.1
 	github.com/comfforts/logger v0.1.1
 	github.com/patrickmn/go-cache v2.1.0+incompatible
