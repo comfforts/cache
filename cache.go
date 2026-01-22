@@ -13,7 +13,6 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/comfforts/cloudstorage"
-	"github.com/comfforts/errors"
 	"github.com/comfforts/logger"
 )
 
@@ -24,15 +23,15 @@ const (
 )
 
 type CacheService interface {
-	Set(key string, value interface{}, d time.Duration) error
-	Get(key string) (interface{}, time.Time)
-	Delete(key string)
-	DeleteExpired()
-	ItemCount() int
-	Items() map[string]cache.Item
-	Updated() bool
-	Clear() error
-	ClearFile() error
+	Set(ctx context.Context, key string, value any, d time.Duration) error
+	Get(key string) (any, time.Time)
+	Delete(ctx context.Context, key string)
+	DeleteExpired(context.Context)
+	ItemCount(context.Context) int
+	Items(context.Context) map[string]cache.Item
+	Updated(context.Context) bool
+	Clear(context.Context) error
+	ClearFile(context.Context) error
 }
 
 type CacheConfig struct {
@@ -49,24 +48,23 @@ type CacheStorageConfig struct {
 	CloudClient cloudstorage.CloudStorage
 }
 
-type MarshalFn func(p interface{}) (interface{}, error)
+type MarshalFn func(p any) (any, error)
 
 type cacheService struct {
 	CacheConfig
-	loadedAt  int64
-	updatedAt int64
-	cache     *cache.Cache
-	logger.AppLogger
+	loadedAt    int64
+	updatedAt   int64
+	cache       *cache.Cache
 	StoreConfig CacheStorageConfig
 }
 
-func newCacheService(cfg CacheConfig, l logger.AppLogger) (*cacheService, error) {
-	if cfg.DataDir == "" || l == nil {
-		return nil, errors.NewAppError(errors.ERROR_MISSING_REQUIRED)
+func newCacheService(cfg CacheConfig) (*cacheService, error) {
+	if cfg.DataDir == "" {
+		return nil, ErrMissingRequired
 	}
 
 	if cfg.MarshalFn == nil {
-		return nil, errors.NewAppError("missing cache data marshalling function")
+		return nil, ErrMarshallingFn
 	}
 
 	defaultExp := cfg.DefaultExpiration
@@ -87,18 +85,22 @@ func newCacheService(cfg CacheConfig, l logger.AppLogger) (*cacheService, error)
 	cacheService := &cacheService{
 		CacheConfig: cfg,
 		cache:       c,
-		AppLogger:   l,
 	}
 	return cacheService, nil
 }
 
-func NewCacheService(cfg CacheConfig, l logger.AppLogger) (*cacheService, error) {
-	cacheService, err := newCacheService(cfg, l)
+func NewCacheService(ctx context.Context, cfg CacheConfig) (*cacheService, error) {
+	l, err := logger.LoggerFromContext(ctx)
+	if err != nil {
+		l = logger.GetSlogLogger()
+	}
+
+	cacheService, err := newCacheService(cfg)
 	if err != nil {
 		return nil, err
 	}
 
-	err = cacheService.loadFile()
+	err = cacheService.loadFile(ctx)
 	if err != nil {
 		l.Info("starting with fresh cache")
 	}
@@ -106,43 +108,48 @@ func NewCacheService(cfg CacheConfig, l logger.AppLogger) (*cacheService, error)
 	return cacheService, nil
 }
 
-func NewWithCloudBackup(cacheCfg CacheConfig, cloudCfg CacheStorageConfig, l logger.AppLogger) (*cacheService, error) {
-	if cacheCfg.DataDir == "" || l == nil {
-		return nil, errors.NewAppError(errors.ERROR_MISSING_REQUIRED)
+func NewWithCloudBackup(ctx context.Context, cacheCfg CacheConfig, cloudCfg CacheStorageConfig) (*cacheService, error) {
+	l, err := logger.LoggerFromContext(ctx)
+	if err != nil {
+		l = logger.GetSlogLogger()
+	}
+
+	if cacheCfg.DataDir == "" {
+		return nil, ErrMissingRequired
 	}
 
 	if cacheCfg.MarshalFn == nil {
-		return nil, errors.NewAppError("missing cache data marshalling function")
+		return nil, ErrMarshallingFn
 	}
 
 	if cloudCfg.CloudClient == nil {
 		if cloudCfg.Bucket == "" || cloudCfg.CredsPath == "" {
 			l.Error("missing bucket and cloud credentials")
-			return nil, errors.NewAppError("missing bucket and cloud credentials")
+			return nil, ErrMissingCloudCred
 		}
 
 		cscCfg := cloudstorage.CloudStorageClientConfig{
 			CredsPath: cloudCfg.CredsPath,
 		}
-		csc, err := cloudstorage.NewCloudStorageClient(cscCfg, l)
+		csc, err := cloudstorage.NewCloudStorageClient(ctx, cscCfg)
 		if err != nil {
 			l.Error("error creating cloud storage client", zap.Error(err))
-			return nil, errors.NewAppError("error creating cloud storage client")
+			return nil, ErrCloudClientInit
 		}
 		cloudCfg.CloudClient = csc
 	}
 	if cloudCfg.Bucket == "" {
 		l.Error("missing bucket information")
-		return nil, errors.NewAppError("missing bucket information")
+		return nil, ErrMissingBucket
 	}
 
-	ca, err := newCacheService(cacheCfg, l)
+	ca, err := newCacheService(cacheCfg)
 	if err != nil {
 		return nil, err
 	}
 	ca.StoreConfig = cloudCfg
 
-	err = ca.loadFile()
+	err = ca.loadFile(ctx)
 	if err != nil {
 		l.Info("starting with fresh cache")
 	}
@@ -150,17 +157,22 @@ func NewWithCloudBackup(cacheCfg CacheConfig, cloudCfg CacheStorageConfig, l log
 	return ca, nil
 }
 
-func (c *cacheService) Set(key string, value interface{}, d time.Duration) error {
-	err := c.cache.Add(key, value, d)
+func (c *cacheService) Set(ctx context.Context, key string, value any, d time.Duration) error {
+	l, err := logger.LoggerFromContext(ctx)
 	if err != nil {
-		c.Error("error setting cache", zap.Error(err), zap.String("key", key), zap.Any("value", value))
-		return errors.WrapError(err, ERROR_SET_CACHE)
+		l = logger.GetSlogLogger()
+	}
+
+	err = c.cache.Add(key, value, d)
+	if err != nil {
+		l.Error("error setting cache", "error", err.Error(), "key", key, "value", value)
+		return ErrSetCache
 	}
 	c.updatedAt = time.Now().Unix()
 	return nil
 }
 
-func (c *cacheService) Get(key string) (interface{}, time.Time) {
+func (c *cacheService) Get(key string) (any, time.Time) {
 	val, exp, ok := c.cache.GetWithExpiration(key)
 	if !ok {
 		return nil, exp
@@ -168,71 +180,86 @@ func (c *cacheService) Get(key string) (interface{}, time.Time) {
 	return val, exp
 }
 
-func (c *cacheService) Delete(key string) {
-	c.delete(key)
+func (c *cacheService) Delete(ctx context.Context, key string) {
+	c.delete(ctx, key)
 }
 
-func (c *cacheService) DeleteExpired() {
-	c.deleteExpired()
+func (c *cacheService) DeleteExpired(ctx context.Context) {
+	c.deleteExpired(ctx)
 }
 
-func (c *cacheService) Items() map[string]cache.Item {
-	return c.items()
+func (c *cacheService) Items(ctx context.Context) map[string]cache.Item {
+	return c.items(ctx)
 }
 
-func (c *cacheService) ItemCount() int {
-	return c.itemCount()
+func (c *cacheService) ItemCount(ctx context.Context) int {
+	return c.itemCount(ctx)
 }
 
-func (c *cacheService) Clear() error {
-	return c.clear()
+func (c *cacheService) Clear(ctx context.Context) error {
+	return c.clear(ctx)
 }
 
-func (c *cacheService) ClearFile() error {
-	filePath := filepath.Join(c.DataDir, fmt.Sprintf("%s.json", c.CacheFileName))
-	c.Info("removing cache file", zap.String("filePath", filePath))
-	_, err := os.Stat(filePath)
+func (c *cacheService) ClearFile(ctx context.Context) error {
+	l, err := logger.LoggerFromContext(ctx)
 	if err != nil {
-		c.Error("error accessing file", zap.Error(err), zap.String("filePath", filePath))
-		return errors.WrapError(err, "error accessing file %s", filePath)
+		l = logger.GetSlogLogger()
+	}
+
+	filePath := filepath.Join(c.DataDir, fmt.Sprintf("%s.json", c.CacheFileName))
+	l.Debug("removing cache file", "filePath", filePath)
+	_, err = os.Stat(filePath)
+	if err != nil {
+		l.Error("error accessing file", "error", err.Error(), "filePath", filePath)
+		return err
 	}
 
 	var cloudErr error
 	if c.StoreConfig.CloudClient != nil {
-		cloudErr = c.deleteCloudCache()
+		cloudErr = c.deleteCloudCache(ctx)
 		if cloudErr != nil {
-			c.Error("error deleting cloud cache file")
+			l.Error("error deleting cloud cache file")
 		}
 	}
 
 	err = os.Remove(filePath)
 	if err != nil {
-		c.Error("error removing file", zap.Error(err), zap.String("filePath", filePath))
-		return errors.WrapError(err, "error removing file %s", filePath)
+		l.Error("error removing file", "error", err.Error(), "filePath", filePath)
+		return err
 	}
 	return cloudErr
 }
 
-func (c *cacheService) Updated() bool {
-	c.Info("cache file status", zap.Int64("loadedAt", c.loadedAt), zap.Int64("updatedAt", c.updatedAt))
+func (c *cacheService) Updated(ctx context.Context) bool {
+	l, err := logger.LoggerFromContext(ctx)
+	if err != nil {
+		l = logger.GetSlogLogger()
+	}
+
+	l.Debug("cache file status", "loadedAt", c.loadedAt, "updatedAt", c.updatedAt)
 	return c.updatedAt > c.loadedAt
 }
 
-func (c *cacheService) loadFile() error {
-	filePath := filepath.Join(c.DataDir, fmt.Sprintf("%s.json", c.CacheFileName))
-	c.Info("loading cache file", zap.String("filePath", filePath))
+func (c *cacheService) loadFile(ctx context.Context) error {
+	l, err := logger.LoggerFromContext(ctx)
+	if err != nil {
+		l = logger.GetSlogLogger()
+	}
 
-	_, err := os.Stat(filePath)
+	filePath := filepath.Join(c.DataDir, fmt.Sprintf("%s.json", c.CacheFileName))
+	l.Debug("loading cache file", "filePath", filePath)
+
+	_, err = os.Stat(filePath)
 	if err != nil {
 		if c.StoreConfig.CloudClient != nil {
-			err := c.downloadCloudCache()
+			err := c.downloadCloudCache(ctx)
 			if err != nil {
-				c.Error("error getting cache file from storage")
-				return errors.WrapError(err, "error getting cache file from storage")
+				l.Error("error getting cache file from storage")
+				return err
 			}
 		} else {
-			c.Error("error no cache file")
-			return errors.WrapError(err, "error no cache file")
+			l.Error("error no cache file")
+			return err
 		}
 	}
 
@@ -240,43 +267,48 @@ func (c *cacheService) loadFile() error {
 	defer func() {
 		err := file.Close()
 		if err != nil {
-			c.Error("error closing file after loading", zap.Error(err))
+			l.Error("error closing file after loading", "error", err.Error())
 		}
 	}()
 	if err != nil {
-		return errors.WrapError(err, ERROR_OPENING_CACHE_FILE)
+		return err
 	}
 
-	err = c.load(file)
+	err = c.load(ctx, file)
 	if err != nil {
-		return errors.WrapError(err, ERROR_LOADING_CACHE_FILE)
+		return err
 	}
 	return nil
 }
 
-func (c *cacheService) load(r io.Reader) error {
+func (c *cacheService) load(ctx context.Context, r io.Reader) error {
+	l, err := logger.LoggerFromContext(ctx)
+	if err != nil {
+		l = logger.GetSlogLogger()
+	}
+
 	dec := json.NewDecoder(r)
 	items := map[string]cache.Item{}
-	err := dec.Decode(&items)
+	err = dec.Decode(&items)
 	if err == nil {
 		for k, v := range items {
 			if !v.Expired() {
 				obj, err := c.MarshalFn(v.Object)
 				if err != nil {
-					c.Error("error marshalling file object", zap.Error(err), zap.String("cacheDir", c.DataDir))
+					l.Error("error marshalling file object", "error", err.Error(), "cacheDir", c.DataDir)
 				} else {
-					err = c.Set(k, obj, 5*time.Hour)
+					err = c.Set(ctx, k, obj, 5*time.Hour)
 					if err != nil {
-						c.Error(ERROR_SET_CACHE, zap.Error(err), zap.String("cacheDir", c.DataDir))
+						l.Error(ERROR_SET_CACHE, "error", err.Error(), "cacheDir", c.DataDir)
 					} else {
-						c.Debug("cache item loaded", zap.String("cacheDir", c.DataDir), zap.String("key", k), zap.Any("value", obj), zap.Any("exp", v.Expiration))
+						l.Debug("cache item loaded", zap.String("cacheDir", c.DataDir), zap.String("key", k), zap.Any("value", obj), zap.Any("exp", v.Expiration))
 					}
 				}
 			}
 		}
 	}
 	c.setLoadedAt(time.Now().Unix())
-	c.Info("cache file loaded", zap.Int64("loadedAt", c.loadedAt), zap.Int64("updatedAt", c.updatedAt))
+	l.Debug("cache file loaded", "loadedAt", c.loadedAt, "updatedAt", c.updatedAt)
 	return err
 }
 
@@ -285,54 +317,79 @@ func (c *cacheService) setLoadedAt(at int64) {
 	c.updatedAt = at
 }
 
-func (c *cacheService) delete(key string) {
+func (c *cacheService) delete(ctx context.Context, key string) {
+	l, err := logger.LoggerFromContext(ctx)
+	if err != nil {
+		l = logger.GetSlogLogger()
+	}
+
 	c.cache.Delete(key)
 	c.updatedAt = time.Now().Unix()
-	c.Debug(KEY_DELETED, zap.String("key", key), zap.String("cacheDir", c.DataDir))
+	l.Debug(KEY_DELETED, "key", key, "cacheDir", c.DataDir)
 }
 
-func (c *cacheService) deleteExpired() {
+func (c *cacheService) deleteExpired(ctx context.Context) {
+	l, err := logger.LoggerFromContext(ctx)
+	if err != nil {
+		l = logger.GetSlogLogger()
+	}
+
 	c.cache.DeleteExpired()
-	c.Debug(DELETED_EXPIRED, zap.String("cacheDir", c.DataDir))
+	l.Debug(DELETED_EXPIRED, "cacheDir", c.DataDir)
 }
 
-func (c *cacheService) itemCount() int {
+func (c *cacheService) itemCount(ctx context.Context) int {
+	l, err := logger.LoggerFromContext(ctx)
+	if err != nil {
+		l = logger.GetSlogLogger()
+	}
+
 	count := c.cache.ItemCount()
-	c.Info(RETURNING_COUNT, zap.String("cacheDir", c.DataDir))
+	l.Debug(RETURNING_COUNT, "cacheDir", c.DataDir)
 	return count
 }
 
-func (c *cacheService) items() map[string]cache.Item {
+func (c *cacheService) items(ctx context.Context) map[string]cache.Item {
+	l, err := logger.LoggerFromContext(ctx)
+	if err != nil {
+		l = logger.GetSlogLogger()
+	}
+
 	items := c.cache.Items()
-	c.Info(RETURNING_ALL_ITEMS, zap.String("cacheDir", c.DataDir))
+	l.Debug(RETURNING_ALL_ITEMS, "cacheDir", c.DataDir)
 	return items
 }
 
-func (c *cacheService) clear() error {
-	if c.Updated() {
-		c.Info("cleaning up geo code data structures")
-		err := c.saveFile()
+func (c *cacheService) clear(ctx context.Context) error {
+	l, err := logger.LoggerFromContext(ctx)
+	if err != nil {
+		l = logger.GetSlogLogger()
+	}
+
+	if c.Updated(ctx) {
+		l.Debug("cleaning up geo code data structures")
+		err := c.saveFile(ctx)
 		if err != nil {
-			c.Error("error saving cache file", zap.Error(err))
+			l.Error("error saving cache file", "error", err.Error())
 			return err
 		}
 
 		if c.StoreConfig.CloudClient != nil {
-			err = c.uploadCloudCache()
+			err = c.uploadCloudCache(ctx)
 			if err != nil {
-				c.Error("error uploading cache file", zap.Error(err))
+				l.Error("error uploading cache file", "error", err.Error())
 				return err
 			}
 		}
 	}
 
 	c.cache.Flush()
-	c.Info(CACHE_FLUSHED, zap.String("cacheDir", c.DataDir))
+	l.Debug(CACHE_FLUSHED, "cacheDir", c.DataDir)
 
 	if c.StoreConfig.CloudClient != nil {
-		err := c.StoreConfig.CloudClient.Close()
+		err := c.StoreConfig.CloudClient.Close(ctx)
 		if err != nil {
-			c.Error("error closing cloud storage client", zap.Error(err))
+			l.Error("error closing cloud storage client", "error", err.Error())
 			return err
 		}
 	}
@@ -340,28 +397,35 @@ func (c *cacheService) clear() error {
 	return nil
 }
 
-func (c *cacheService) saveFile() error {
-	filePath := filepath.Join(c.DataDir, fmt.Sprintf("%s.json", c.CacheFileName))
-	c.Info("saving cache file", zap.String("filePath", filePath))
+func (c *cacheService) saveFile(ctx context.Context) error {
+	l, err := logger.LoggerFromContext(ctx)
+	if err != nil {
+		l = logger.GetSlogLogger()
+	}
 
-	_, err := os.Stat(filepath.Dir(filePath))
+	filePath := filepath.Join(c.DataDir, fmt.Sprintf("%s.json", c.CacheFileName))
+	l.Debug("saving cache file", "filePath", filePath)
+
+	_, err = os.Stat(filepath.Dir(filePath))
 	if err != nil {
 		if os.IsNotExist(err) {
 			err = os.MkdirAll(filepath.Dir(filePath), os.ModePerm)
 		}
 	}
 	if err != nil {
-		return errors.WrapError(err, ERROR_CREATING_CACHE_DIR)
+		l.Error("error creating cache directory", "error", err.Error(), "dirPath", filepath.Dir(filePath))
+		return err
 	}
 
 	file, err := os.Create(filePath)
 	if err != nil {
-		return errors.WrapError(err, ERROR_GETTING_CACHE_FILE)
+		l.Error("error creating cache file", "error", err.Error(), "filePath", filePath)
+		return err
 	}
 	defer func() {
 		err := file.Close()
 		if err != nil {
-			c.Error("error closing file after saving", zap.Error(err))
+			l.Error("error closing file after saving", "error", err.Error())
 		}
 	}()
 
@@ -369,111 +433,104 @@ func (c *cacheService) saveFile() error {
 	items := c.cache.Items()
 	err = encoder.Encode(items)
 	if err != nil {
-		return errors.WrapError(err, ERROR_SAVING_CACHE_FILE)
+		l.Error("error saving cache file", "error", err.Error(), "filePath", filePath)
+		return err
 	}
-	c.Info("cache file saved", zap.String("filePath", filePath))
+	l.Debug("cache file saved", "filePath", filePath)
 	return nil
 }
 
-func (c *cacheService) deleteCloudCache() error {
-	ctx, cancel := context.WithCancel(context.Background())
+func (c *cacheService) deleteCloudCache(ctx context.Context) error {
+	l, err := logger.LoggerFromContext(ctx)
+	if err != nil {
+		l = logger.GetSlogLogger()
+	}
+
+	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	if c.StoreConfig.CloudClient == nil {
-		c.Error("missing cloud storage client")
-		return errors.NewAppError("missing cloud storage client")
+		l.Error("missing cloud storage client")
+		return ErrMissingCloudClient
 	}
 
 	cacheFile := filepath.Join(c.DataDir, fmt.Sprintf("%s.json", c.CacheFileName))
 	fStats, err := os.Stat(cacheFile)
 	if err != nil {
-		c.Error("error accessing file", zap.Error(err), zap.String("filepath", cacheFile))
-		return errors.WrapError(err, "error accessing file %s", cacheFile)
-	}
-
-	fmod := fStats.ModTime().Unix()
-	c.Info("file mod time", zap.Int64("modtime", fmod), zap.String("filepath", cacheFile))
-
-	cfr, err := cloudstorage.NewCloudFileRequest(
-		c.StoreConfig.Bucket,
-		filepath.Base(cacheFile),
-		filepath.Dir(cacheFile),
-		fmod,
-	)
-	if err != nil {
-		c.Error("error creating cloud file request", zap.Error(err), zap.String("filepath", cacheFile))
+		l.Error("error accessing file", "error", err.Error(), "filepath", cacheFile)
 		return err
 	}
 
-	err = c.StoreConfig.CloudClient.DeleteObject(ctx, cfr)
+	fmod := fStats.ModTime().Unix()
+	l.Debug("file mod time", "modtime", fmod, "filepath", cacheFile)
+
+	err = c.StoreConfig.CloudClient.DeleteObject(ctx, c.StoreConfig.Bucket, cacheFile)
 	if err != nil {
-		c.Error("error deleting cloud file", zap.Error(err))
+		l.Error("error deleting cloud file", "error", err.Error())
 		return err
 	}
 	return nil
 }
 
-func (c *cacheService) uploadCloudCache() error {
-	ctx, cancel := context.WithCancel(context.Background())
+func (c *cacheService) uploadCloudCache(ctx context.Context) error {
+	l, err := logger.LoggerFromContext(ctx)
+	if err != nil {
+		l = logger.GetSlogLogger()
+	}
+
+	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	if c.StoreConfig.CloudClient == nil {
-		c.Error("missing cloud storage client")
-		return errors.NewAppError("missing cloud storage client")
+		return ErrMissingCloudClient
 	}
 
 	cacheFile := filepath.Join(c.DataDir, fmt.Sprintf("%s.json", c.CacheFileName))
 	fStats, err := os.Stat(cacheFile)
 	if err != nil {
-		c.Error("error accessing file", zap.Error(err), zap.String("filepath", cacheFile))
-		return errors.WrapError(err, "error accessing file %s", cacheFile)
+		l.Error("error accessing file", "error", err.Error(), "filepath", cacheFile)
+		return err
 	}
 
 	fmod := fStats.ModTime().Unix()
-	c.Info("file mod time", zap.Int64("modtime", fmod), zap.String("filepath", cacheFile))
+	l.Debug("file mod time", "modtime", fmod, "filepath", cacheFile)
 
 	file, err := os.Open(cacheFile)
 	if err != nil {
-		c.Error("error accessing file", zap.Error(err), zap.String("filepath", cacheFile))
-		return errors.WrapError(err, "error opening file %s", cacheFile)
+		l.Error("error accessing file", "error", err.Error(), "filepath", cacheFile)
+		return err
 	}
 	defer func() {
 		if err := file.Close(); err != nil {
-			c.Error("error closing file", zap.Error(err), zap.String("filepath", cacheFile))
+			l.Error("error closing file", "error", err.Error(), "filepath", cacheFile)
 		}
 	}()
 
-	cfr, err := cloudstorage.NewCloudFileRequest(
-		c.StoreConfig.Bucket,
-		filepath.Base(cacheFile),
-		filepath.Dir(cacheFile),
-		fmod,
-	)
+	n, err := c.StoreConfig.CloudClient.UploadFile(ctx, file, c.StoreConfig.Bucket, filepath.Dir(cacheFile), filepath.Base(cacheFile))
 	if err != nil {
-		c.Error("error creating file upload request", zap.Error(err), zap.String("filepath", cacheFile))
+		l.Error("error uploading file", "error", err.Error())
 		return err
 	}
-
-	n, err := c.StoreConfig.CloudClient.UploadFile(ctx, file, cfr)
-	if err != nil {
-		c.Error("error uploading file", zap.Error(err))
-		return err
-	}
-	c.Info("uploaded file",
-		zap.String("file", filepath.Base(cacheFile)),
-		zap.String("path", filepath.Dir(cacheFile)),
-		zap.Int64("bytes", n),
+	l.Debug("uploaded file",
+		"file", filepath.Base(cacheFile),
+		"path", filepath.Dir(cacheFile),
+		"bytes", n,
 	)
 	return nil
 }
 
-func (c *cacheService) downloadCloudCache() error {
-	ctx, cancel := context.WithCancel(context.Background())
+func (c *cacheService) downloadCloudCache(ctx context.Context) error {
+	l, err := logger.LoggerFromContext(ctx)
+	if err != nil {
+		l = logger.GetSlogLogger()
+	}
+
+	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	if c.StoreConfig.CloudClient == nil {
-		c.Error("missing cloud storage client")
-		return errors.NewAppError("missing cloud storage client")
+		l.Error("missing cloud storage client")
+		return ErrMissingCloudClient
 	}
 
 	cacheFile := filepath.Join(c.DataDir, fmt.Sprintf("%s.json", c.CacheFileName))
@@ -482,45 +539,34 @@ func (c *cacheService) downloadCloudCache() error {
 	if err != nil {
 		err = os.MkdirAll(filepath.Dir(cacheFile), os.ModePerm)
 		if err != nil {
-			c.Error("error creating file directory", zap.Error(err), zap.String("filepath", cacheFile))
-			return errors.WrapError(err, "error creating file directory")
+			l.Error("error creating file directory", "error", err.Error(), "filepath", cacheFile)
+			return err
 		}
 	} else {
 		fmod = fStats.ModTime().Unix()
-		c.Info("file mod time", zap.Int64("modtime", fmod), zap.String("filepath", cacheFile))
+		l.Debug("file mod time", "modtime", fmod, "filepath", cacheFile)
 	}
 
 	f, err := os.Create(cacheFile)
 	if err != nil {
-		c.Error("error creating file", zap.Error(err), zap.String("filepath", cacheFile))
-		return errors.WrapError(err, "error creating file %s", cacheFile)
+		l.Error("error creating file", "error", err.Error(), "filepath", cacheFile)
+		return err
 	}
 	defer func() {
 		if err := f.Close(); err != nil {
-			c.Error("error closing file", zap.Error(err), zap.String("filepath", cacheFile))
+			l.Error("error closing file", "error", err.Error(), "filepath", cacheFile)
 		}
 	}()
 
-	cfr, err := cloudstorage.NewCloudFileRequest(
-		c.StoreConfig.Bucket,
-		filepath.Base(cacheFile),
-		filepath.Dir(cacheFile),
-		fmod,
-	)
+	n, err := c.StoreConfig.CloudClient.DownloadFile(ctx, f, c.StoreConfig.Bucket, filepath.Dir(cacheFile), filepath.Base(cacheFile))
 	if err != nil {
-		c.Error("error creating cloud upload request", zap.Error(err), zap.String("filepath", cacheFile))
+		l.Error("error downloading file", "error", err.Error(), "filepath", cacheFile)
 		return err
 	}
-
-	n, err := c.StoreConfig.CloudClient.DownloadFile(ctx, f, cfr)
-	if err != nil {
-		c.Error("error downloading file", zap.Error(err), zap.String("filepath", cacheFile))
-		return err
-	}
-	c.Info(
+	l.Debug(
 		"downloaded file",
-		zap.String("file", filepath.Base(cacheFile)),
-		zap.String("path", filepath.Dir(cacheFile)),
-		zap.Int64("bytes", n))
+		"file", filepath.Base(cacheFile),
+		"path", filepath.Dir(cacheFile),
+		"bytes", n)
 	return nil
 }

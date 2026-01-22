@@ -1,6 +1,7 @@
 package cache_test
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"testing"
@@ -37,21 +38,23 @@ func TestCache(t *testing.T) {
 	for scenario, fn := range map[string]func(
 		t *testing.T,
 		client cache.CacheService,
+		testLogger logger.Logger,
 	){
 		"cache set get, succeeds":        testSetGet,
 		"cache set get delete, succeeds": testSetGetDelete,
 		"cache set expire, succeeds":     testSetGetExpire,
 	} {
 		t.Run(scenario, func(t *testing.T) {
-			client, teardown := setupTest(t)
+			client, l, teardown := setupTest(t)
 			defer teardown()
-			fn(t, client)
+			fn(t, client, l)
 		})
 	}
 }
 
 func setupTest(t *testing.T) (
 	ca cache.CacheService,
+	testLogger logger.Logger,
 	teardown func(),
 ) {
 	t.Helper()
@@ -61,14 +64,15 @@ func setupTest(t *testing.T) (
 		dataDir = TEST_DIR
 	}
 
-	testLogger := logger.NewTestAppLogger(dataDir)
 	cacheCfg := cache.CacheConfig{
 		DataDir:   dataDir,
 		MarshalFn: UnmarshallTestStruct,
 	}
 
-	// ca, err := cache.NewCacheService(cacheCfg, testLogger)
-	// require.NoError(t, err)
+	l := logger.GetSlogMultiLogger(dataDir)
+	l.Debug("TestCache started")
+
+	ctx := logger.WithLogger(context.Background(), l)
 
 	var err error
 	credsPath := os.Getenv("CREDS_PATH")
@@ -78,23 +82,23 @@ func setupTest(t *testing.T) (
 			CredsPath: credsPath,
 			Bucket:    bktName,
 		}
-		ca, err = cache.NewWithCloudBackup(cacheCfg, cloudCfg, testLogger)
+		ca, err = cache.NewWithCloudBackup(ctx, cacheCfg, cloudCfg)
 		require.NoError(t, err)
 	} else {
-		ca, err = cache.NewCacheService(cacheCfg, testLogger)
+		ca, err = cache.NewCacheService(ctx, cacheCfg)
 		require.NoError(t, err)
 	}
 	require.Equal(t, true, ca != nil)
 
-	return ca, func() {
-		t.Log(" TestCache ended")
+	return ca, l, func() {
+		l.Debug("TestCache ended")
 
-		err = ca.Clear()
+		err = ca.Clear(ctx)
 		require.NoError(t, err)
 	}
 }
 
-func testSetGet(t *testing.T, ca cache.CacheService) {
+func testSetGet(t *testing.T, ca cache.CacheService, l logger.Logger) {
 	val := TestStruct{
 		Name: "John",
 		Age:  34,
@@ -102,10 +106,13 @@ func testSetGet(t *testing.T, ca cache.CacheService) {
 	key := "test"
 
 	now := time.Now().Unix()
-	err := ca.Set(key, val, 5*time.Minute)
+
+	ctx := logger.WithLogger(context.Background(), l)
+
+	err := ca.Set(ctx, key, val, 5*time.Minute)
 	require.NoError(t, err)
 
-	count := ca.ItemCount()
+	count := ca.ItemCount(ctx)
 	require.Equal(t, 1, count)
 
 	cVal, exp := ca.Get(key)
@@ -117,15 +124,17 @@ func testSetGet(t *testing.T, ca cache.CacheService) {
 	require.Equal(t, val.Name, rVal.Name)
 }
 
-func testSetGetDelete(t *testing.T, ca cache.CacheService) {
+func testSetGetDelete(t *testing.T, ca cache.CacheService, l logger.Logger) {
 	val := TestStruct{
 		Name: "John",
 		Age:  34,
 	}
 	key := "test"
 
+	ctx := logger.WithLogger(context.Background(), l)
+
 	now := time.Now().Unix()
-	err := ca.Set(key, val, 5*time.Minute)
+	err := ca.Set(ctx, key, val, 5*time.Minute)
 	require.NoError(t, err)
 
 	cVal, exp := ca.Get(key)
@@ -136,16 +145,16 @@ func testSetGetDelete(t *testing.T, ca cache.CacheService) {
 	require.Equal(t, val.Age, rVal.Age)
 	require.Equal(t, val.Name, rVal.Name)
 
-	count := ca.ItemCount()
+	count := ca.ItemCount(ctx)
 	require.Equal(t, 1, count)
 
-	ca.Delete(key)
+	ca.Delete(ctx, key)
 
-	count = ca.ItemCount()
+	count = ca.ItemCount(ctx)
 	require.Equal(t, 0, count)
 }
 
-func testSetGetExpire(t *testing.T, ca cache.CacheService) {
+func testSetGetExpire(t *testing.T, ca cache.CacheService, l logger.Logger) {
 	val := TestStruct{
 		Name: "John",
 		Age:  34,
@@ -153,7 +162,10 @@ func testSetGetExpire(t *testing.T, ca cache.CacheService) {
 	key := "test"
 
 	now := time.Now().Unix()
-	err := ca.Set(key, val, 3*time.Second)
+
+	ctx := logger.WithLogger(context.Background(), l)
+
+	err := ca.Set(ctx, key, val, 3*time.Second)
 	require.NoError(t, err)
 
 	cVal, exp := ca.Get(key)
@@ -164,14 +176,14 @@ func testSetGetExpire(t *testing.T, ca cache.CacheService) {
 	require.Equal(t, val.Age, rVal.Age)
 	require.Equal(t, val.Name, rVal.Name)
 
-	count := ca.ItemCount()
+	count := ca.ItemCount(ctx)
 	require.Equal(t, 1, count)
 
 	time.Sleep(3 * time.Second)
 
-	ca.DeleteExpired()
+	ca.DeleteExpired(ctx)
 
-	count = ca.ItemCount()
+	count = ca.ItemCount(ctx)
 	require.Equal(t, 0, count)
 }
 
@@ -181,13 +193,16 @@ func TestSetGetReload(t *testing.T) {
 		dataDir = TEST_DIR
 	}
 
-	testLogger := logger.NewTestAppLogger(dataDir)
 	cacheCfg := cache.CacheConfig{
 		DataDir:       dataDir,
 		CacheFileName: "delivery",
 		MarshalFn:     UnmarshallTestStruct,
 	}
-	ca, err := cache.NewCacheService(cacheCfg, testLogger)
+
+	l := logger.GetSlogMultiLogger(dataDir)
+	ctx := logger.WithLogger(context.Background(), l)
+
+	ca, err := cache.NewCacheService(ctx, cacheCfg)
 	require.NoError(t, err)
 
 	val := TestStruct{
@@ -197,7 +212,7 @@ func TestSetGetReload(t *testing.T) {
 	key := "test"
 
 	now := time.Now().Unix()
-	err = ca.Set(key, val, 5*time.Minute)
+	err = ca.Set(ctx, key, val, 5*time.Minute)
 	require.NoError(t, err)
 
 	cVal, exp := ca.Get(key)
@@ -208,25 +223,25 @@ func TestSetGetReload(t *testing.T) {
 	require.Equal(t, val.Age, rVal.Age)
 	require.Equal(t, val.Name, rVal.Name)
 
-	count := ca.ItemCount()
+	count := ca.ItemCount(ctx)
 	require.Equal(t, 1, count)
 
-	updated := ca.Updated()
+	updated := ca.Updated(ctx)
 	require.Equal(t, true, updated)
 
-	err = ca.Clear()
+	err = ca.Clear(ctx)
 	require.NoError(t, err)
 
-	ca, err = cache.NewCacheService(cacheCfg, testLogger)
+	ca, err = cache.NewCacheService(ctx, cacheCfg)
 	require.NoError(t, err)
 
-	count = ca.ItemCount()
+	count = ca.ItemCount(ctx)
 	require.Equal(t, 1, count)
 
-	updated = ca.Updated()
+	updated = ca.Updated(ctx)
 	require.Equal(t, false, updated)
 
-	err = ca.ClearFile()
+	err = ca.ClearFile(ctx)
 	require.NoError(t, err)
 }
 
@@ -241,7 +256,6 @@ func TestSetGetReloadCloud(t *testing.T) {
 	require.Equal(t, true, credsPath != "")
 	require.Equal(t, true, bktName != "")
 
-	testLogger := logger.NewTestAppLogger(dataDir)
 	cacheCfg := cache.CacheConfig{
 		DataDir:   dataDir,
 		MarshalFn: UnmarshallTestStruct,
@@ -251,7 +265,11 @@ func TestSetGetReloadCloud(t *testing.T) {
 		CredsPath: credsPath,
 		Bucket:    bktName,
 	}
-	ca, err := cache.NewWithCloudBackup(cacheCfg, cloudCfg, testLogger)
+
+	l := logger.GetSlogMultiLogger(dataDir)
+	ctx := logger.WithLogger(context.Background(), l)
+
+	ca, err := cache.NewWithCloudBackup(ctx, cacheCfg, cloudCfg)
 	require.NoError(t, err)
 
 	val := TestStruct{
@@ -261,7 +279,7 @@ func TestSetGetReloadCloud(t *testing.T) {
 	key := "test10"
 
 	now := time.Now().Unix()
-	err = ca.Set(key, val, 5*time.Minute)
+	err = ca.Set(ctx, key, val, 5*time.Minute)
 	require.NoError(t, err)
 
 	cVal, exp := ca.Get(key)
@@ -274,20 +292,20 @@ func TestSetGetReloadCloud(t *testing.T) {
 
 	time.Sleep(50 * time.Millisecond)
 
-	count := ca.ItemCount()
+	count := ca.ItemCount(ctx)
 	require.Equal(t, 1, count)
 
-	err = ca.Clear()
+	err = ca.Clear(ctx)
 	require.NoError(t, err)
 
-	ca, err = cache.NewWithCloudBackup(cacheCfg, cloudCfg, testLogger)
+	ca, err = cache.NewWithCloudBackup(ctx, cacheCfg, cloudCfg)
 	require.NoError(t, err)
 
 	time.Sleep(50 * time.Millisecond)
 
-	count = ca.ItemCount()
+	count = ca.ItemCount(ctx)
 	require.Equal(t, 1, count)
 
-	err = ca.ClearFile()
+	err = ca.ClearFile(ctx)
 	require.NoError(t, err)
 }
